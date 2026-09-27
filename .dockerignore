@@ -1,0 +1,88 @@
+# Files / dirs not needed inside the image
+# Keep build context small; the API binaries (~141 MB) and Python deps dominate.
+
+# Version control
+.git/
+.gitignore
+.github/
+
+# Local virtualenv / caches / bytecode
+.venv/
+venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python build / distribution artifacts
+build/
+develop-eggs/
+dist/
+*.egg-info/
+*.egg
+.installed.cfg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Test / coverage
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Logs / runtime data / secrets
+*.log
+logs/
+log/
+downloads/
+downloads.db*
+accounts_export_*.json
+api/web/
+api/.kugou_gcid_cache.json
+api/data/
+
+# Env files
+.env
+.env.*
+env.bak/
+ENV.bak/
+
+# Windows junk
+Thumbs.db
+Desktop.ini
+$null
+
+# Local build / release scripts and fpk packaging tooling
+build.py
+build_linux.sh
+build_win.bat
+release.py
+release.bat
+fnpack-linux-amd64
+fnos/
+icon.ico
+
+# Repo-local docs are not needed in the container
+docs/
+README.md
+version.txt
+
+# Docker / compose meta
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
