@@ -822,6 +822,18 @@ class QqClient:
         out = []
         for g in groups:
             for t in (g.get("toplist") or []):
+                # addable：预览条目是否含可下载歌曲标识。非歌曲类榜单（专辑/
+                # 有声/MV 销量榜）预览条目 id=0 且无 mid，详情接口顶层 songs
+                # 恒为空（2026-09-27 实测 23/75/134/201/502/506），前端据此
+                # 置灰添加按钮。预览为空属未知（如上游坏榜 138），保守视为
+                # 可添加，误判由 api.add_playlist 的 get_toplist_meta 守门兜底。
+                # 注意：toplist 条目的 songs 预览字段无既有消费先例，字段路径
+                # 以 2026-09-27 全量实测（46 榜）为基线，上游改版需重做实测。
+                preview = t.get("songs") or []
+                has_song = any(
+                    isinstance(s, dict) and (s.get("mid") or s.get("id"))
+                    for s in preview
+                )
                 out.append({
                     "id": t.get("id"),
                     "name": t.get("name") or t.get("title_detail") or "",
@@ -829,6 +841,7 @@ class QqClient:
                     "update_frequency": t.get("period") or t.get("update_time") or "",
                     "cover_img_url": _fix_img_url(t.get("head_pic_url") or t.get("front_pic_url") or ""),
                     "track_count": 0,
+                    "addable": has_song or not preview,
                 })
         return out
 
@@ -894,6 +907,28 @@ class QqClient:
             if detail:
                 return detail
         return self._songlist_detail(pid, limit)
+
+    def get_toplist_meta(self, top_id: int) -> dict:
+        """轻量探测榜单类型（GET /top/{id}/detail?num=1&page=1）
+
+        添加失败时区分「榜单不存在 / 上游故障」与「非歌曲类榜单」：
+        - exists: 上游返回 code=0 且 info 非空
+        - has_songs: 顶层 songs 是否非空（非歌曲榜恒为空，2026-09-27 实测）
+        - name: 榜单名（文案用）
+        请求失败（含上游业务失败 code!=0）返回 {}，调用方回退通用文案。
+        """
+        result = self._request(f"/top/{top_id}/detail",
+                               params={"num": 1, "page": 1}, timeout=10)
+        if not result:
+            return {}
+        info = result.get("info") or {}
+        if not isinstance(info, dict) or not info:
+            return {}
+        return {
+            "exists": True,
+            "name": info.get("name") or "",
+            "has_songs": bool(result.get("songs") or []),
+        }
 
     def _toplist_detail(self, top_id: int, limit: int) -> dict:
         """榜单详情（/top/{id}/detail，按 num=100 分页聚合）"""

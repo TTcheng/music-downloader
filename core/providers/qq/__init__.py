@@ -122,6 +122,10 @@ class QqProvider(MusicProvider):
         """获取歌单/榜单详情（旁路代理，内部榜单/歌单分流）"""
         return self._ensure_client().get_playlist_detail(*args, **kwargs)
 
+    def get_toplist_meta(self, *args, **kwargs):
+        """轻量探测榜单类型（旁路代理，api.add_playlist 守门用）"""
+        return self._ensure_client().get_toplist_meta(*args, **kwargs)
+
     def create_qr_login(self, *args, **kwargs):
         """生成扫码登录二维码（QQ/微信，旁路代理）"""
         return self._ensure_client().create_qr_login(*args, **kwargs)

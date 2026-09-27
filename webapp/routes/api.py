@@ -355,6 +355,16 @@ def add_playlist():
         client = _get_client(platform)
         detail = client.get_playlist_detail(pid, limit=1)
         if not detail:
+            # QQ 榜单（pid<10000，判据来源 qq/client.py get_playlist_detail
+            # 分流规则，两处须保持同步）区分「非歌曲类榜单」与真无效 ID：
+            # 专辑/有声/MV 类榜单上游详情顶层 songs 恒为空，是产品层不支持
+            # 而非 Cookie/ID 问题，给明确文案避免误导排查
+            if platform == "qq" and pid < 10000:
+                meta = client.get_toplist_meta(pid)
+                if meta.get("exists") and not meta.get("has_songs"):
+                    return jsonify({"code": 1, "msg":
+                        f"「{meta.get('name') or pid}」为专辑/非歌曲类榜单，"
+                        "无歌曲列表，无法添加"})
             return jsonify({"code": 1, "msg": "无法获取歌单信息，请检查 ID 或 Cookie"})
         # 上游歌单名为空（键存在值为 null）时不再回落 str(pid)：Playlist.name 是
         # nullable=False，"18398083374" 这种无名记录同样是脏数据，明确拒绝更一致
