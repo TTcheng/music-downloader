@@ -882,7 +882,13 @@ class QqClient:
         Returns:
             {"name","track_count","tracks":[{"id"(songmid),"name","artists","fee"}]}
         """
-        pid = int(playlist_id)
+        try:
+            pid = int(playlist_id)
+        except (TypeError, ValueError):
+            # #33：脏数据防御（对齐 kugou 同款守门）——常规调用链上
+            # parse_qq_playlist_id / Playlist.id 已保证 int，此处兜底直调
+            logger.warning("QQ歌单ID非法: %r", playlist_id)
+            return {}
         if pid < 10000:
             detail = self._toplist_detail(pid, limit)
             if detail:

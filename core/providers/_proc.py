@@ -15,10 +15,12 @@ spawn_protected 是本模块对外唯一入口，两个 bridge（qq/netease）�
 此时正常退出仍由 bridge.stop() / atexit 兜底。
 """
 
+import functools
 import logging
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -82,21 +84,25 @@ def _linux_prctl():
     return _LINUX_PRCTL or None
 
 
-def _linux_pdeathsig_preexec() -> None:
+def _linux_pdeathsig_preexec(parent_pid: int) -> None:
     """Linux 子进程内（fork 后、exec 前）启用父亡信号，并回查 ppid 防竞态。
 
     该回调只在子进程地址空间执行，须自包含（不依赖闭包安全），失败只静默忽略。
     本回调绝不调用 dlopen/ctypes.CDLL——prctl 符号已在父进程解析并缓存；
     getppid/kill 均为 libc async-signal-safe 调用。
+
+    parent_pid：fork 前父进程记录的 pid。竞态回查用 getppid() != parent_pid
+    而非 == 1：若父进程被某个 subreaper（如 systemd-nspawn 衍生容器）收养，
+    ppid 会变为 subreaper 而非 1，== 1 检查会漏掉这种收养场景。
     """
     prctl = _linux_prctl()
     if prctl is None:
         return
     try:
         prctl(1, _LINUX_PDEATHSIG)        # PR_SET_PDEATHSIG = 1
-        # 竞态回查：若父进程在 prctl 设置前已退出，本进程已被 init(ppid=1) 收养，
-        # 此时父亡信号不会再触发，改为立即自杀。
-        if os.getppid() == 1:
+        # 竞态回查：若父进程在 prctl 设置前已退出（ppid 已变成 init 或
+        # subreaper），父亡信号不会再触发，改为立即自杀。
+        if os.getppid() != parent_pid:
             os.kill(os.getpid(), _LINUX_PDEATHSIG)
     except Exception:
         # 设置失败则保持默认行为；正常退出仍由 bridge.stop() 兜底
@@ -208,12 +214,21 @@ def _attach_windows_job(proc: "subprocess.Popen") -> None:
 # inner 进程继承，从而保持不弹窗（代价是产生隐藏的 conhost.exe 宿主进程）。
 _WIN_CREATE_NO_WINDOW = 0x08000000
 
+# 常驻单线程执行器（修复 #18）：PDEATHSIG（PR_SET_PDEATHSIG）的信号在
+# 「父进程中创建该子进程的线程」退出时发送（prctl(2) 语义），并非整个父
+# 进程退出。Flask threaded 模式下 bridge.start() 常由请求线程调用，请求
+# 结束线程销毁即误杀刚 spawn 的 API 子进程，表现为"服务时好时坏"。将
+# Popen 固定调度到本执行器的常驻线程执行（线程随进程存活，不设 idle
+# 退出），绑定线程永不退出，从根上消除误杀。
+_SPAWN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="proc-spawner")
+
 
 def spawn_protected(cmd, cwd=None, env=None, stdout=None, stderr=None):
     """按平台为子进程启用"父进程死亡即终止"，返回 subprocess.Popen 实例。
 
     参数透传给 subprocess.Popen；平台差异（Windows 的 CREATE_NO_WINDOW + 作业
-    对象、Linux 的 PDEATHSIG preexec）在本函数内封装。
+    对象、Linux 的 PDEATHSIG preexec）在本函数内封装。Popen 统一经常驻单线程
+    执行器调度（#18），调用方语义不变（阻塞至 spawn 完成）。
 
     :param cmd: 可执行命令列表
     :param cwd: 子进程工作目录
@@ -223,12 +238,14 @@ def spawn_protected(cmd, cwd=None, env=None, stdout=None, stderr=None):
     kwargs = {"cwd": cwd, "env": env, "stdout": stdout, "stderr": stderr}
     if sys.platform == "win32":
         kwargs["creationflags"] = _WIN_CREATE_NO_WINDOW
-        proc = subprocess.Popen(cmd, **kwargs)
+        proc = _SPAWN_EXECUTOR.submit(subprocess.Popen, cmd, **kwargs).result()
         _attach_windows_job(proc)
         return proc
     if sys.platform.startswith("linux"):
         # 必须在 fork 之前（父进程内）完成 prctl 符号解析；解析失败则不挂
-        # preexec_fn，回退朴素 Popen（正常退出仍由 bridge.stop() 兜底）
+        # preexec_fn，回退朴素 Popen（正常退出仍由 bridge.stop() 兜底）。
+        # parent_pid 经 partial 传入子进程回调做竞态回查（覆盖 subreaper 收养）
         if _linux_prctl() is not None:
-            kwargs["preexec_fn"] = _linux_pdeathsig_preexec
-    return subprocess.Popen(cmd, **kwargs)
+            kwargs["preexec_fn"] = functools.partial(
+                _linux_pdeathsig_preexec, os.getpid())
+    return _SPAWN_EXECUTOR.submit(subprocess.Popen, cmd, **kwargs).result()

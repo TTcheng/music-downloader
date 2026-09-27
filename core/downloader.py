@@ -311,6 +311,10 @@ class Downloader:
                 actual = tmp.stat().st_size
                 if expected_size and actual < expected_size - 1024:
                     raise IOError(f"文件大小不匹配: 期望 {expected_size}, 实际 {actual}")
+                # 上限校验（#29）：actual 显著大于 expected（>1MB 容差，容忍
+                # chunked/头部差异）说明上游返回了脏数据/劫持响应，拒绝落盘
+                if expected_size and actual > expected_size + 1024 * 1024:
+                    raise IOError(f"文件大小超出预期: 期望 {expected_size}, 实际 {actual}")
 
                 tmp.replace(target)
                 logger.info("下载完成: %s", target.relative_to(self.output_dir))
@@ -338,6 +342,13 @@ class Downloader:
                 )
             if tmp.exists():
                 resume_pos = tmp.stat().st_size
+                # 脏 .part 清理（#29）：残留明显超出预期大小（>1MB 容差）时
+                # 丢弃续传从零重下，避免在劫持/错误响应的残留文件上继续追加
+                if expected_size and resume_pos > expected_size + 1024 * 1024:
+                    logger.warning("残留 .part 超出预期大小(%d > %d)，丢弃重下: %s",
+                                   resume_pos, expected_size, tmp)
+                    tmp.unlink(missing_ok=True)
+                    resume_pos = 0
             if attempt < self.max_retries:
                 # 中止检查点④：退避等待分段进行。整段 sleep(1.5*attempt) 会让
                 # 暂停最多多等 4.5s（max_retries=3 时的最坏情况）

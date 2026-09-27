@@ -164,6 +164,9 @@ A: 上游对已下架 / 失效曲目会返回空曲名。0.7.0 起程序不再�
 ### Q: 所有账号都提示"小时限额已满"？
 A: 所有启用账号在当前自然小时内的成功下载数已达 `hourly_limit_per_account` 上限，系统会自动暂停 30 分钟后继续，无需手动干预。
 
+### Q: 额度（quota_limit / hourly_limit_per_account）是怎么统计的？
+A: 按**全部成功下载**计数（含免费歌曲，0.7.2 起口径明确），不是"可下载的收费歌数量"。这是刻意设计——额度用于控制对上游的请求频率、降低账号风控风险；免费歌同样产生真实请求，也需计入。
+
 ### Q: QQ 音乐歌词无法下载？
 A: 0.6.0 起新版 QQ 音乐 API 已支持歌词下载；若个别歌曲仍缺失，多为瞬时接口失败，程序会自动重试一次，仍失败则跳过歌词继续下载音频与封面。
 
@@ -203,4 +206,4 @@ chmod +x build_linux.sh && ./build_linux.sh
 
 ## 版本
 
-当前版本：**0.7.1**（见 [version.txt](version.txt)，更新日志见 [docs/CHANGELOG.md](docs/CHANGELOG.md)）
+当前版本：**0.7.2**（见 [version.txt](version.txt)，更新日志见 [docs/CHANGELOG.md](docs/CHANGELOG.md)）

@@ -307,12 +307,17 @@
 
     <!-- 保存按钮 -->
     <div class="col-12">
-        <button type="submit" class="btn btn-primary">
+        <button type="submit" class="btn btn-primary" id="btn-save-settings">
             <i class="bi bi-save"></i> 保存设置
         </button>
     </div>
 </div>
 </form>
+<script>
+    // is_admin 由 app.py context processor 注入；非管理员禁用保存
+    // （后端 PUT /api/settings 亦有 _require_admin 校验，此处只是避免无效提交）
+    window.IS_ADMIN = {{ 'true' if is_admin else 'false' }};
+</script>
 {% endblock %}
 
 {% block scripts %}

@@ -74,6 +74,11 @@ def _api_require_login():
     if not user or not user.enabled:
         session.clear()
         return jsonify({"code": 401, "msg": "用户已被禁用或不存在"}), 401
+    # 首登强制改密：默认密码未修改前，仅放行自助改密接口，其余 API 一律 403
+    # （带 must_change_password 标记，前端 app.js 据此跳改密页而非报"无权限"）
+    if getattr(user, "must_change_password", False):
+        if request.path.rstrip("/") != "/api/users/me/password":
+            return jsonify({"code": 403, "msg": "请先修改默认密码", "must_change_password": True}), 403
     return None
 
 
@@ -317,6 +322,11 @@ def add_playlist():
     pl_type = data.get("type", "user")
     limit = _safe_int(data.get("limit", 100), 100, lo=1, hi=9999)
     platform = (data.get("platform") or "").strip().lower() or "netease"
+
+    # platform 显式白名单（与 add_account 同款）：platform 会原样入库并经
+    # 前端 innerHTML 输出，脏值既有 XSS 面、也会污染复合主键维度
+    if platform not in PLATFORMS:
+        return jsonify({"code": 1, "msg": f"不支持的平台: {platform}，可选: {PLATFORM_NAMES}"}), 400
 
     if not source:
         return jsonify({"code": 1, "msg": "请输入歌单 ID 或链接"})
@@ -863,20 +873,54 @@ _VALID_LEVELS = {
     "jymaster", "ogg640", "jyeffect", "dolby", "vivid", "sky",
 }
 
+# 自定义 API 服务地址类设置项：下载/同步/账号测试会把全部账号 Cookie 作为
+# 请求头发往该地址，保存时必须校验协议与主机名（防指向攻击者服务器窃取 Cookie）
+_URL_SETTINGS = {"custom_api_url", "qq_api_base_url", "kugou_api_base_url"}
+
+
+def _validate_api_url(key: str, value: str) -> str:
+    """校验自定义 API URL：非空时必须 http/https 协议且带主机名
+
+    Returns:
+        错误提示；空串表示合法
+    """
+    if key not in _URL_SETTINGS or not value:
+        return ""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return f"{key} 不是合法的 URL"
+    if parts.scheme not in ("http", "https"):
+        return f"{key} 仅支持 http/https 协议"
+    if not parts.netloc:
+        return f"{key} 缺少主机名（形如 http://127.0.0.1:45602）"
+    return ""
+
 
 @api_bp.route("/settings", methods=["PUT"])
 def save_settings():
-    """保存配置
+    """保存配置（仅管理员：设置全局生效，任何登录用户修改都会影响所有人）
 
     请求体：key-value 字典，仅更新提交的字段。
     web_port 修改后需重启服务才生效。
     ncm_api_port 修改需在API服务停止状态下进行。
     """
+    err = _require_admin()
+    if err:
+        return err
     from models import DEFAULT_SETTINGS
     data = _json_body()
     if not isinstance(data, dict):          # 保留原防御（_json_body 已保证 dict，此检查恒真，0 成本）
         return jsonify({"code": 1, "msg": "请求体必须是 JSON 对象"}), 400
     allowed = set(DEFAULT_SETTINGS.keys())
+
+    # 自定义 API URL 校验：非法直接拒绝保存（白名单 keys 之外的 URL 类字段不受影响）
+    for key in _URL_SETTINGS:
+        if key in data:
+            url_err = _validate_api_url(key, str(data[key] or "").strip())
+            if url_err:
+                return jsonify({"code": 1, "msg": url_err}), 400
 
     # 端口变化时校验：API服务运行中禁止修改端口（仅当请求体携带该字段时校验，
     # 避免裸 API 部分更新被误拦）
@@ -1768,6 +1812,34 @@ def _require_admin():
     return None
 
 
+@api_bp.route("/users/me/password", methods=["POST"])
+def change_my_password():
+    """当前用户自助修改密码
+
+    请求体：{"old_password":"xxx", "new_password":"xxx"}
+    首登强制改密场景由此接口解锁（_api_require_login 对本接口豁免拦截）；
+    须验证旧密码，新密码 ≥6 位且不得与旧密码相同。成功后清除
+    must_change_password 标记。
+    """
+    user = current_user()
+    if not user:
+        return jsonify({"code": 401, "msg": "未登录或登录已过期"}), 401
+    data = _json_body()
+    old_pwd = data.get("old_password") or ""
+    new_pwd = data.get("new_password") or ""
+    if not user.check_password(old_pwd):
+        return jsonify({"code": 1, "msg": "旧密码错误"})
+    if len(new_pwd) < 6:
+        return jsonify({"code": 1, "msg": "密码长度至少 6 位"})
+    if new_pwd == old_pwd:
+        return jsonify({"code": 1, "msg": "新密码不能与旧密码相同"})
+    user.set_password(new_pwd)
+    user.must_change_password = False
+    db.session.commit()
+    logger.info("用户 %s 修改了自己的密码", user.username)
+    return jsonify({"code": 0, "msg": "密码已修改"})
+
+
 @api_bp.route("/users")
 def list_users():
     """获取用户列表（仅管理员）"""
@@ -1824,12 +1896,13 @@ def update_user(uid: int):
     data = _json_body()
     me = current_user()
 
-    # 修改密码
+    # 修改密码（管理员重置任意用户密码；重置即视为脱离默认密码态）
     if "password" in data:
         new_pwd = data["password"] or ""
         if len(new_pwd) < 6:
             return jsonify({"code": 1, "msg": "密码长度至少 6 位"})
         user.set_password(new_pwd)
+        user.must_change_password = False
 
     # 修改管理员身份（不能取消自己的管理员身份）
     if "is_admin" in data:

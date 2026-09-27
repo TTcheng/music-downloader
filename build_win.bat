@@ -53,9 +53,10 @@ if not exist ".venv\Scripts\python.exe" (
 )
 echo [INFO] Using virtual environment: .venv
 
-REM Check dependencies in venv
+REM Check dependencies in venv (fix #27: all runtime deps, not just flask;
+REM aligned with the 5-lib loop check in build_linux.sh)
 echo [STEP] Check dependencies...
-.venv\Scripts\python.exe -c "import flask" >nul 2>nul
+.venv\Scripts\python.exe -c "import flask, flask_sqlalchemy, apscheduler, requests, mutagen" >nul 2>nul
 if errorlevel 1 (
     echo [INFO] Installing dependencies from requirements.txt...
     .venv\Scripts\python.exe -m pip install -r requirements.txt
