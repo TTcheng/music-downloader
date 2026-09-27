@@ -80,8 +80,8 @@ start_app() {
   pid=$!
   echo "$pid" > "$PID_FILE"
 
-  # 等待 socket 出现（最多 ~60s；onefile 解压 + Flask 初始化 + 拉起 3 个
-  # API 子进程，低端 NAS 上可能超过 15s），失败则报错回滚
+  # 等待 socket 出现（最多 ~60s；onefile 解压 + Flask 初始化，
+  # API 子进程改后台异步启动，不再阻塞 socket 出现），失败则报错回滚
   i=0
   while [ "$i" -lt 60 ]; do
     if [ -S "$SOCKET_FILE" ]; then

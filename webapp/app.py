@@ -11,7 +11,9 @@ import logging
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
+from typing import Any
 
 # 把项目根目录（code/client）和 webapp 目录加入 sys.path
 # 使 core、webapp 内的模块（models/task_manager）均可导入
@@ -296,6 +298,26 @@ def serve(app, gateway_socket, gateway_prefix, host, port) -> None:
     srv.serve_forever()
 
 
+def _start_api_bridges(bridges: list[tuple[str, Any]]) -> None:
+    """后台线程体：逐个拉起 auto_start 的 API 桥接。
+
+    - start() 幂等且锁内串行；失败只记 WARNING（与原 main() 行为一致），
+      不影响 Web 服务（已在 serve() 中就绪）
+    - 客户端 base_url 属性自带惰性 start()：本线程尚未拉起时，首个业务
+      请求会在锁上等待/自行拉起，语义与 auto_start=false 的"用到再拉"一致
+    """
+    for name, br in bridges:
+        if not br.auto_start:
+            continue
+        try:
+            br.start()
+            logger.info("%sAPI 服务就绪: %s", name, br.base_url)
+        except RuntimeError as e:
+            logger.warning("%sAPI 服务启动失败: %s", name, e)
+        except Exception as e:            # 后台线程兜底：任何异常不得带崩线程
+            logger.warning("%sAPI 服务启动异常: %s", name, e)
+
+
 def main() -> None:
     host, port = _read_web_bind()
     # Setting.get 需在 app context 内调用；读出后显式传入，
@@ -324,24 +346,24 @@ def main() -> None:
     atexit.register(qq_bridge_inst.stop)
     kugou_bridge_inst = kugou_bridge.get_bridge(auto_start=kugou_auto_start, port=kugou_api_port)
     atexit.register(kugou_bridge_inst.stop)
-    if ncm_bridge.auto_start:
-        try:
-            ncm_bridge.start()
-            logger.info("网易云API服务就绪: %s", ncm_bridge.base_url)
-        except RuntimeError as e:
-            logger.warning("网易云API服务启动失败: %s", e)
-    if qq_bridge_inst.auto_start:
-        try:
-            qq_bridge_inst.start()
-            logger.info("QQ音乐API服务就绪: %s", qq_bridge_inst.base_url)
-        except RuntimeError as e:
-            logger.warning("QQ音乐API服务启动失败: %s", e)
-    if kugou_bridge_inst.auto_start:
-        try:
-            kugou_bridge_inst.start()
-            logger.info("酷狗音乐API服务就绪: %s", kugou_bridge_inst.base_url)
-        except RuntimeError as e:
-            logger.warning("酷狗音乐API服务启动失败: %s", e)
+    # API 桥接后台异步启动：同步启动曾在 serve() 之前阻塞最长 6×60s，
+    # 撞上飞牛启动脚本 60s socket 等待窗口导致应用启动失败（见
+    # 《修复方案-API桥接后台异步启动-2026-09-27.md》§1）。
+    # daemon 线程 + 逐个串行，顺序与原逻辑一致（ncm → qq → kugou）
+    threading.Thread(
+        target=_start_api_bridges,
+        args=([
+            ("网易云", ncm_bridge),
+            ("QQ音乐", qq_bridge_inst),
+            ("酷狗音乐", kugou_bridge_inst),
+        ],),
+        name="api-bridge-starter",
+        # daemon=True 是方案成立的关键：主进程退出时该线程被强制带走，
+        # 避免 stop() 在 finally 处阻塞等待；在途子进程由 spawn_protected
+        # 的 PDEATHSIG / Win 作业对象兜底回收
+        daemon=True,
+    ).start()
+    logger.info("API 服务转后台启动，Web 服务先行就绪")
     task_manager.start()
     logger.info("=" * 50)
     logger.info("Deen音乐下载器 Web 服务启动 (v%s)", __version__)
