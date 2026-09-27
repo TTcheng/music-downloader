@@ -26,6 +26,30 @@ def _login_key(username: str) -> str:
     return f"{username}|{request.remote_addr or ''}"
 
 
+def _safe_internal_path(next_url) -> bool:
+    """站内路径校验（#8）：必须以单个 / 开头且 urlsplit 解析无 scheme/netloc。
+
+    覆盖 //evil.com、/\\evil.com、/\\t//evil.com 等协议相对与反斜杠/控制
+    字符变体；非字符串或解析异常一律视为不安全。
+    """
+    if not next_url or not isinstance(next_url, str):
+        return False
+    if not next_url.startswith("/") or next_url.startswith("//"):
+        return False
+    if "\\" in next_url:
+        return False
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in next_url):
+        # 控制字符（含 \t \r \n 与 DEL）：可被部分客户端解析器忽略或截断，
+        # 制造校验与实际跳转目标不一致的开放重定向缝隙，一律拒绝
+        return False
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(next_url)
+    except ValueError:
+        return False
+    return not parts.scheme and not parts.netloc
+
+
 def _login_blocked(key: str) -> bool:
     """该 key 是否处于锁定窗口内；窗口过期则清除记录"""
     with _login_lock:
@@ -62,11 +86,32 @@ AVAILABLE_PLATFORMS = [
 # ======================================================================
 # 登录 / 登出
 # ======================================================================
+@views_bp.before_request
+def _force_password_change():
+    """首登强制改密：默认密码未修改前，除登录/登出/改密页外一律重定向
+
+    仅拦页面路由（/api/* 由 routes/api.py 的 _api_require_login 拦截并
+    返回 403+must_change_password 标记，前端据此跳改密页）。
+    """
+    if request.path.startswith("/api/"):
+        return None
+    user = current_user()
+    if not user or not user.must_change_password:
+        return None
+    allowed = {"views.login", "views.logout", "views.change_password"}
+    if request.endpoint in allowed:
+        return None
+    return redirect(url_for("views.change_password"))
+
+
 @views_bp.route("/login", methods=["GET", "POST"])
 def login():
     """用户登录"""
-    # 已登录直接跳转总览
-    if current_user():
+    # 已登录直接跳转；尚在强制改密期则跳改密页（防 login→dashboard→改密页 循环）
+    _user = current_user()
+    if _user:
+        if _user.must_change_password:
+            return redirect(url_for("views.change_password"))
         return redirect(url_for("views.dashboard"))
     if request.method == "POST":
         username = request.form.get("username", "").strip()
@@ -80,16 +125,44 @@ def login():
             session["uid"] = user.id
             user.last_login_at = datetime.now()
             db.session.commit()
-            # 支持 next 参数跳回原页面（拦协议相对 // 与反斜杠 /\\ 变体，防开放重定向）
+            # 支持 next 参数跳回原页面（urlsplit 校验 scheme/netloc 为空，
+            # 覆盖协议相对与反斜杠/控制字符变体，防开放重定向 #8）
             next_url = request.args.get("next")
-            if (next_url and next_url.startswith("/")
-                    and not next_url.startswith("//")
-                    and not next_url.startswith("/\\")):
+            if _safe_internal_path(next_url):
                 return redirect(next_url)
             return redirect(url_for("views.dashboard"))
         _record_login_failure(key)
         return render_template("login.html", error="用户名或密码错误")
     return render_template("login.html")
+
+
+@views_bp.route("/change_password", methods=["GET", "POST"])
+def change_password():
+    """修改密码页（首登强制改密的落地页；正常用户也可自助改密）
+
+    服务端表单处理（与 login 风格一致，不依赖 JS）：校验旧密码、
+    新密码长度、两次输入一致；成功后清除强制改密标记并跳总览。
+    """
+    user = current_user()
+    if not user:
+        return redirect(url_for("views.login"))
+    if request.method == "POST":
+        old_pwd = request.form.get("old_password", "")
+        new_pwd = request.form.get("new_password", "")
+        confirm = request.form.get("confirm_password", "")
+        if not user.check_password(old_pwd):
+            return render_template("change_password.html", error="旧密码错误", user=user)
+        if len(new_pwd) < 6:
+            return render_template("change_password.html", error="新密码至少 6 位", user=user)
+        if new_pwd != confirm:
+            return render_template("change_password.html", error="两次输入的新密码不一致", user=user)
+        if new_pwd == old_pwd:
+            return render_template("change_password.html", error="新密码不能与旧密码相同", user=user)
+        user.set_password(new_pwd)
+        user.must_change_password = False
+        db.session.commit()
+        return redirect(url_for("views.dashboard"))
+    return render_template("change_password.html", user=user)
 
 
 @views_bp.route("/logout")

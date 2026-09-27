@@ -47,6 +47,14 @@ elif os.environ.get("APP_DATA_DIR"):
     _db_file = Path(os.environ["APP_DATA_DIR"]).expanduser().resolve() / "downloads.db"
 else:
     _db_file = _ROOT / "downloads.db"
+
+# 目标库不存在时直接报错退出：init_db 会静默新建空库（并创建默认 admin），
+# 误报"重置成功"会让用户误以为真实库已改密
+if not _db_file.is_file():
+    print(f"[错误] 数据库文件不存在: {_db_file}")
+    print("       请检查 --data-dir / APP_DATA_DIR 是否指向真实数据目录")
+    sys.exit(1)
+
 init_db(app, str(_db_file))
 
 DEFAULT_USERNAME = "admin"
@@ -61,6 +69,8 @@ def reset(username: str, new_password: str) -> None:
             print(f"[错误] 用户 '{username}' 不存在")
             sys.exit(1)
         user.set_password(new_password)
+        # 管理员主动重置即视为脱离默认密码态，不触发首登强制改密
+        user.must_change_password = False
         db.session.commit()
         print(f"[成功] 用户 '{username}' 密码已重置为 '{new_password}'")
 

@@ -97,18 +97,50 @@ def ensure_pyinstaller(py: str) -> None:
     print("[INFO] PyInstaller 安装完成")
 
 
+# dist 产物目录内的用户数据（onefile 场景数据库/下载目录/密钥与 exe 同级），
+# 清理时必须保留：宁多留不多删。SQLite 附属文件（-shm/-wal/-journal）必须
+# 与 .db 同生共死——删 .db 不删 WAL 会导致下次启动 recover 异常。
+_PRESERVE_NAMES = {
+    "downloads", "logs",
+    "downloads.db", "downloads.db-shm", "downloads.db-wal", "downloads.db-journal",
+    "secret_key",
+}
+
+
+def _remove_path(p: Path) -> None:
+    """删除单个文件/目录，失败静默（清理是尽力而为）"""
+    try:
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def clean_old_build() -> None:
-    """清理上次的构建产物（dist / build / .spec）"""
-    for p in (DIST_DIR, BUILD_DIR, SPEC_FILE):
+    """清理上次的构建产物（dist / build / .spec），跳过产物目录内的用户数据
+
+    build/ 与 .spec 为纯临时产物整删；dist/ 逐项清理——onefile 场景用户
+    可能直接在 dist/<APP_NAME>/ 内运行过程序，downloads.db / downloads/ /
+    secret_key / logs/ 是用户数据，重打包不得连带删除。
+    """
+    for p in (BUILD_DIR, SPEC_FILE):
         if p.exists():
-            if p.is_dir():
-                shutil.rmtree(p, ignore_errors=True)
+            _remove_path(p)
+    if DIST_DIR.exists():
+        for child in DIST_DIR.iterdir():
+            if child.name in _PRESERVE_NAMES:
+                continue
+            if child.is_dir() and child.name == APP_NAME:
+                # 产物应用目录：内部同样逐项清理（用户数据可能混在其内）
+                for inner in child.iterdir():
+                    if inner.name in _PRESERVE_NAMES:
+                        continue
+                    _remove_path(inner)
             else:
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
-    print("[INFO] 已清理旧的 build / dist / .spec")
+                _remove_path(child)
+    print("[INFO] 已清理旧的 build / dist / .spec（保留产物目录内用户数据）")
 
 
 def runtime_hook_path() -> Path:

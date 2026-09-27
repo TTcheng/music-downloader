@@ -63,6 +63,31 @@ _QUALITY_HASH_KEY = {
     "high": "hash_high",
 }
 
+# 登录态取流降级链：从目标档起向低逐档回退，128 为兜底。
+# 修复 #11：原实现 flac 失败直接落 128，VIP 用户拿不到 320。
+_KUGOU_QUALITY_ORDER = ["high", "flac", "320", "128"]
+
+
+def _kugou_chain_from(target: str) -> list[str]:
+    """登录态降级链：目标档及其以下所有档位（升序到 128 兜底）"""
+    try:
+        start = _KUGOU_QUALITY_ORDER.index(target)
+    except ValueError:
+        start = _KUGOU_QUALITY_ORDER.index("128")
+    return _KUGOU_QUALITY_ORDER[start:]
+
+
+def _safe_int(value, default=None):
+    """安全转 int：非数字/None 返回 default（上游脏数据防御）。
+
+    default 用 None 而非 0：0 会让 _fetch_album_songs 去查"专辑 0"，
+    污染上游缓存；调用方拿到 None 直接跳过即可。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 # 实际 quality -> 统一音质档位名（level 回填用；320 归 exhigh）
 _LEVEL_BY_QUALITY = {
     "128": "standard",
@@ -300,9 +325,15 @@ class KuGouClient:
             _dfid_cache.pop(self.base_url, None)
 
     def _build_cookie(self) -> str:
-        """合并登录 Cookie 与 dfid（服务端对客户端已提供的 dfid 不覆盖）"""
+        """合并登录 Cookie 与 dfid（服务端对客户端已提供的 dfid 不覆盖）
+
+        #31：用户 cookie 已自带 dfid= 字段时不重复追加（不区分大小写），
+        避免请求头出现双 dfid 字段。
+        """
         dfid = self._ensure_dfid()
         if self._cookie:
+            if re.search(r"(?:^|;\s*)dfid=", self._cookie, re.IGNORECASE):
+                return self._cookie
             return f"{self._cookie};dfid={dfid}"
         return f"dfid={dfid}"
 
@@ -419,6 +450,12 @@ class KuGouClient:
         """
         # 形态 4：歌单曲目型（mixsongid 顶层字段是本形态唯一标识）
         if "mixsongid" in raw:
+            # 空值守门（#30）：mixsongid 为 null/空时 str() 会产出 "None"
+            # 字符串——它是 truthy，会穿透 task_manager 的"无 id 跳过"守门，
+            # 进入 Song 主键把该歌永久卡成"已下载"。与下方 aaid 守门同款
+            # 内层拒绝语义，无效条目直接返回 None。
+            if not raw.get("mixsongid"):
+                return None
             singer_names = [str(s.get("name") or "").strip()
                             for s in (raw.get("singerinfo") or []) if isinstance(s, dict)]
             artists = "/".join(n for n in singer_names if n)
@@ -515,12 +552,19 @@ class KuGouClient:
                 for k in list(_song_cache)[:overflow]:
                     _song_cache.pop(k, None)
 
-    def _ensure_song(self, song_id: str) -> dict | None:
+    def _ensure_song(self, song_id: str, need_levels: set | None = None) -> dict | None:
         """确保歌曲条目在缓存中且含元数据与 hash（冷缓存两步回填）
 
         song_id = album_audio_id。缓存 miss 时：
         1) /krm/audio 取元数据（含 album_id，可定位所属专辑；本身不返回 hash）
         2) /album/songs?id={album_id} 回查所属专辑曲目，恢复各档位 hash
+
+        need_levels：本次调用需要覆盖的档位集合（取流路径传降级链全档，
+        如 {"flac","320","128"}）。
+        - None（详情类调用）：维持旧行为——hashes 非空即视为缓存有效；
+        - 指定时：缓存 hash 未覆盖 need_levels 即触发专辑回查合并缺档。
+          修复 #10：歌单同步条目往往只带 128 档 hash，原"hashes 非空即命中"
+          会让 320/flac 档 hash 永不回补，登录态高音质恒落 128。
 
         Returns:
             缓存条目 dict；歌曲不存在（/krm/audio 无数据）返回 None
@@ -529,8 +573,10 @@ class KuGouClient:
         now = time.time()
         with _song_cache_lock:
             entry = _song_cache.get(sid)
+        cached_hashes = (entry or {}).get("hashes") or {}
         if entry and now - entry["ts"] < _SONG_TTL \
-                and entry.get("hashes") and entry.get("meta"):
+                and entry.get("meta") \
+                and (need_levels is None or need_levels <= set(cached_hashes)):
             return entry
 
         body = self._request("/krm/audio", {"album_audio_id": sid})
@@ -556,14 +602,23 @@ class KuGouClient:
             "disc_no": 0,
             "albumartist": base.get("author_name") or "",
         }
-        # hash 恢复：已有缓存 hash 优先，缺失时经所属专辑曲目回查
-        hashes = (entry or {}).get("hashes") or {}
+        # hash 恢复：已有缓存 hash 优先；按需档位缺失（need_levels 指定）
+        # 或完全无 hash（详情类调用）时经所属专辑曲目回查，合并时只补缺档
+        # 不覆盖已有 hash
+        hashes = dict(cached_hashes)
         album_id = base.get("album_id")
-        if not hashes and album_id:
-            for s in self._fetch_album_songs(int(album_id), max_songs=100):
-                if s.get("id") == sid:
-                    hashes = s.get("hashes") or {}
-                    break
+        if need_levels is not None:
+            missing = need_levels - set(hashes)
+        else:
+            missing = {"128"} if not hashes else set()
+        if album_id and missing:
+            aid = _safe_int(album_id)
+            if aid:
+                for s in self._fetch_album_songs(aid, max_songs=100):
+                    if s.get("id") == sid:
+                        for q, h in (s.get("hashes") or {}).items():
+                            hashes.setdefault(q, h)
+                        break
         new_entry = {
             "hashes": hashes,
             "meta": meta,
@@ -675,46 +730,47 @@ class KuGouClient:
         def _empty(err: str = "") -> dict:
             return {"url": None, "ext": "mp3", "size": None,
                     "is_trial": False, "err": err}
-        entry = self._ensure_song(sid)
+        logged_in = self._is_logged_in()
+        # 匿名态高音质档会被服务端强制降级 128（实测任意档位 hash 匿名均返回
+        # _errno=0 且 quality/extname 恒为 128/mp3），直接用 128 hash 结果相同
+        # 且省一次无效请求；登录态（含 token）才按目标档位请求真实高音质。
+        target = quality if logged_in else "128"
+        # need_levels = 本次取流的降级链全档：缓存未覆盖则触发 _ensure_song
+        # 专辑回查补 hash（#10），取流端按链逐档回退（#11）
+        chain = _kugou_chain_from(target) if logged_in else ["128"]
+        entry = self._ensure_song(sid, need_levels=set(chain) if logged_in else {"128"})
         if not entry:
             return _empty("元数据或hash获取失败")
         hashes = entry.get("hashes") or {}
 
-        # 匿名态高音质档会被服务端强制降级 128（实测任意档位 hash 匿名均返回
-        # _errno=0 且 quality/extname 恒为 128/mp3），直接用 128 hash 结果相同
-        # 且省一次无效请求；登录态（含 token）才按目标档位请求真实高音质。
-        target = quality if self._is_logged_in() else "128"
-        if not hashes.get(target):
-            # 目标档 hash 缺失：hash 决定文件内容，回退 128 档
-            target = "128"
-        hash_ = hashes.get(target) or hashes.get("128")
-        # 实际生效档（降级路径回写 "128"；level 回填用，勿用 quality）
-        actual = target
-        if not hash_:
-            return _empty("无可用音质hash")
-
-        # 双端点路由：匿名走 v6（v5 匿名 status=2 全拒绝）；
-        # 登录态走 v5 拿真实高音质（v6 对部分 VIP 账号一律降级 128）
-        if not self._is_logged_in():
+        if not logged_in:
+            hash_ = hashes.get("128")
+            if not hash_:
+                return _empty("无可用音质hash")
             item = self._request_url_v6(hash_, sid)
+            actual = "128"
         else:
-            item = self._request_url_v5(hash_, sid, target)
-            # 登录态三级降级链（目标档失败时）：
-            # 1) v5 128 档重试（非 VIP 账号冲高音质 / 该档需更高会员）
-            # 2) v6 128 兜底（v5 拒绝但 token 未完全失效时仍可下 128）
+            # 登录态降级链（修复 #11：目标档失败逐档回退，不再直接跳 128）：
+            # 只尝试 hash 存在的档位；每档失败记 warning 便于排查静默降级
+            chain = [q for q in chain if hashes.get(q)]
+            if not chain:
+                return _empty("无可用音质hash")
+            actual = chain[-1]
+            item = {"ok": False, "err": ""}
+            for q in chain:
+                item = self._request_url_v5(hashes[q], sid, q)
+                if item.get("ok"):
+                    actual = q
+                    break
+                logger.warning("酷狗取流 %s 档失败(sid=%s): %s，尝试更低档位",
+                               q, sid, item.get("err"))
             if not item.get("ok"):
-                hash128 = hashes.get("128")
-                if hash128 and hash128 != hash_:
-                    retry = self._request_url_v5(hash128, sid, "128")
-                    if retry.get("ok"):
-                        item = retry
-                        actual = "128"
-                if not item.get("ok"):
-                    retry6 = self._request_url_v6(
-                        hashes.get("128") or hash_, sid)
-                    if retry6.get("ok"):
-                        item = retry6
-                        actual = "128"
+                # v6 128 兜底（v5 拒绝但 token 未完全失效时仍可下 128）
+                retry6 = self._request_url_v6(
+                    hashes.get("128") or hashes[chain[0]], sid)
+                if retry6.get("ok"):
+                    item = retry6
+                    actual = "128"
         if not item.get("ok"):
             # v5 err 含 status/error_code，v6 err 含 _errno（6=音频不存在，
             # VIP 歌无有效登录凭证时常见，即凭证缺 vip_token/vip_type 或 token 失效）
@@ -904,7 +960,13 @@ class KuGouClient:
             [{"id"(album_audio_id),"name","artists","album","fee"}]
             各档位 hash 同步写入 _song_cache 供取流使用
         """
-        songs = self._fetch_album_songs(int(album_id))
+        # #32：album_id 脏数据防御——_safe_int 归一，None（非法）直接返回空
+        # 列表（不查"专辑 0"，避免污染上游缓存）
+        aid = _safe_int(album_id)
+        if aid is None:
+            logger.warning("酷狗专辑ID非法，已按空处理: %r", album_id)
+            return []
+        songs = self._fetch_album_songs(aid)
         return [{"id": s["id"], "name": s["name"], "artists": s["artists"],
                  "album": s["album"], "fee": s["fee"]} for s in songs]
 
@@ -1012,7 +1074,11 @@ class KuGouClient:
             pid = int(playlist_id)
         except (TypeError, ValueError):
             return {}
-        ranks = {int(r["rankid"]): r for r in self._load_ranks() if r.get("rankid") is not None}
+        # #32：rankid 脏字符串防御——_load_ranks 只滤 None，int() 直转会抛
+        # ValueError；_safe_int 归一为 None 后过滤掉脏条目
+        ranks = {_safe_int(r["rankid"]): r
+                 for r in self._load_ranks()
+                 if _safe_int(r.get("rankid")) is not None}
         if pid in ranks:
             return self._rank_detail(pid, ranks[pid], limit)
         return self._playlist_tracks_detail(pid, limit)
@@ -1106,8 +1172,10 @@ class KuGouClient:
         """获取热门/分类歌单（/top/playlist，2026-09-04 实测匿名可用）
 
         上游分页特性（实测）：返回条数不受 pagesize 完全控制——推荐流
-        （category_id=0）固定每页 35 条、分类页固定 30 条，故以 30 请求、
-        本地切片对齐 offset，不足一页且 has_next 时继续翻页补足。
+        （category_id=0）固定每页 35 条、分类页固定 30 条，故按分类选择
+        页宽（修复 #12：原一律按 30 计算，推荐流每页错位 5 条导致漏歌/
+        重复歌）、本地切片对齐 offset，不足一页且 has_next 时继续翻页补足；
+        实际响应条数与页宽常量不符时以实际条数为准（防上游再变）。
         每条歌单的 specialid→gcid 映射在本方法内顺手持久化（后续
         get_playlist_detail 取曲目依赖该映射）。
 
@@ -1124,7 +1192,10 @@ class KuGouClient:
         tags = self._load_playlist_tags()
         category_id = tags.get(cat, 0)
         sort = 1 if order != "new" else 2
-        page_size = 30                     # 上游分类页固定 30/页（实测 20/35/50 均回 30）
+        # 修复 #12：推荐流（category_id=0）上游固定 35 条/页、分类页 30 条/页，
+        # 页码与页内偏移必须按对应页宽计算，否则网格错位（offset=30 时请求
+        # 上游第 2 页即条目 36-70，条目 31-35 永久漏掉）
+        page_size = 35 if category_id == 0 else 30
         page = offset // page_size + 1
         start = offset % page_size
         collected: list[dict] = []
@@ -1155,6 +1226,13 @@ class KuGouClient:
                     continue
                 break
             _cache_gcid_mappings(raw_list)
+            # 实际条数与页宽常量不符（上游变更）：以实际条数更新页宽并告警，
+            # 后续页码/切片按实际网格对齐
+            if len(raw_list) != page_size:
+                logger.warning(
+                    "酷狗热门歌单分页实际条数与页宽不符(page=%s 预期%s 实际%s)，按实际条数对齐",
+                    page, page_size, len(raw_list))
+                page_size = max(len(raw_list), 1)
             seg = raw_list[start:] if page == offset // page_size + 1 else raw_list
             start = 0                      # 仅第一页需要切片对齐
             for it in seg:

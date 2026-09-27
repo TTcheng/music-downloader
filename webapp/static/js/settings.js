@@ -1,5 +1,16 @@
 // 设置页逻辑
 
+// 设置保存仅管理员可用（后端 PUT /api/settings 有 _require_admin 校验，
+// 前端禁用保存按钮只是避免普通用户提交后收到 403 的无效操作）
+if (window.IS_ADMIN === false) {
+    const saveBtn = document.getElementById("btn-save-settings");
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.title = "仅管理员可修改设置";
+        saveBtn.innerHTML = '<i class="bi bi-lock"></i> 保存设置（仅管理员）';
+    }
+}
+
 // 加载设置
 async function loadSettings() {
     try {

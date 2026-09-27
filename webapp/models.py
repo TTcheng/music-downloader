@@ -252,6 +252,9 @@ class User(db.Model):
     enabled = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
     last_login_at = db.Column(db.DateTime)
+    # 首登强制改密：仅 init_db 新建初始 admin 时置 True；改密/管理员重置
+    # 后置 False。存量账号（旧库升级）默认 False，不会被强制。
+    must_change_password = db.Column(db.Boolean, default=False, nullable=False)
 
     def set_password(self, raw: str) -> None:
         self.password_hash = generate_password_hash(raw)
@@ -265,6 +268,7 @@ class User(db.Model):
             "username": self.username,
             "is_admin": self.is_admin,
             "enabled": self.enabled,
+            "must_change_password": bool(self.must_change_password),
             "created_at": self.created_at.strftime("%Y-%m-%d %H:%M:%S") if self.created_at else None,
             "last_login_at": self.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if self.last_login_at else None,
         }
@@ -605,10 +609,16 @@ def init_db(app, db_path: str = "downloads.db") -> None:
         with db.engine.begin() as conn:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_platform_song ON download_tasks (platform, song_id)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_status ON download_tasks (status)"))
+        # 兼容迁移：给旧 users 表补充 must_change_password 列（存量账号默认 False，不强制改密）
+        if inspector.has_table("users") and not _column_exists(inspector, "users", "must_change_password"):
+            with db.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN must_change_password BOOLEAN DEFAULT 0 NOT NULL"))
         # 初始化默认管理员账号（仅当 users 表为空时）
         if not User.query.first():
             admin = User(username="admin", is_admin=True, enabled=True)
             admin.set_password("admin123")
+            # 默认口令公开于源码/README：首登强制修改，改完才可使用其他功能
+            admin.must_change_password = True
             db.session.add(admin)
             db.session.commit()
-            print("[init_db] 已创建初始管理员账号：admin / admin123")
+            print("[init_db] 已创建初始管理员账号：admin / admin123（首次登录须修改密码）")

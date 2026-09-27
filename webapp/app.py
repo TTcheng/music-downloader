@@ -11,7 +11,9 @@ import logging
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
+from typing import Any
 
 # 把项目根目录（code/client）和 webapp 目录加入 sys.path
 # 使 core、webapp 内的模块（models/task_manager）均可导入
@@ -70,9 +72,8 @@ from version import get_version
 __version__ = get_version()
 
 app = Flask(__name__)
-# Session 签名密钥：优先使用环境变量，未设置则用默认值
-app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "netease-downloader-secret-key-v060")
-# cookie 专属名：统一网关模式下与其他同域应用（各自默认 session）隔离，避免冲突
+# Session 签名密钥：在数据目录确定后由 _resolve_secret_key() 三级解析
+# （环境变量 > 数据目录持久化文件 > 硬编码兜底告警），见下方 DB_PATH 之后
 app.config["SESSION_COOKIE_NAME"] = "md_session"
 # 版本号入 config（账号导出文件等处经 current_app.config 读取）
 app.config["APP_VERSION"] = __version__
@@ -89,6 +90,17 @@ if GATEWAY_PREFIX:
 def inject_version():
     """把版本号注入所有模板上下文，供 {{ version }} 使用"""
     return {"version": __version__}
+
+
+@app.context_processor
+def inject_user_flag():
+    """把 is_admin 注入所有模板上下文，供前端隐藏管理员专属操作（如保存设置）"""
+    from auth import current_user
+    try:
+        user = current_user()
+    except Exception:       # 无请求上下文等场景下渲染模板不该炸
+        user = None
+    return {"is_admin": bool(user and user.is_admin)}
 
 
 @app.context_processor
@@ -116,6 +128,44 @@ elif os.environ.get("APP_DATA_DIR"):
     DB_PATH = Path(os.environ["APP_DATA_DIR"]).expanduser().resolve() / "downloads.db"
 else:
     DB_PATH = _ROOT / "downloads.db"   # 缺省：保持原行为
+
+
+def _resolve_secret_key() -> str:
+    """Session 签名密钥三级解析：环境变量 > 数据目录持久化文件 > 硬编码兜底
+
+    源码公开场景下硬编码密钥可被用于伪造管理员 session cookie，故首启生成
+    随机密钥并持久化到数据目录（与数据库同目录）。仅当文件系统不可写等极端
+    情况才回退硬编码并显式告警（保证 fnOS 只读安装目录场景不拒绝启动——
+    网关模式数据卷可写，正常不会走到兜底）。密钥变更 = 全部 session 失效，
+    用户重新登录即可（属预期）。
+    """
+    env_key = os.environ.get("FLASK_SECRET_KEY")
+    if env_key:
+        return env_key
+    key_file = DB_PATH.parent / "secret_key"
+    fallback = "netease-downloader-secret-key-v060"
+    try:
+        if key_file.exists():
+            val = key_file.read_text(encoding="utf-8").strip()
+            if val:
+                return val
+        import secrets
+        val = secrets.token_hex(32)
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        # O_CREAT|O_EXCL 原子创建：并发首启只有一个进程写入成功
+        try:
+            fd = os.open(str(key_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(val)
+        except FileExistsError:
+            val = key_file.read_text(encoding="utf-8").strip() or val
+        return val
+    except OSError as e:
+        logger.warning("密钥文件读写失败（目录只读？），回退默认密钥（会话可被伪造，不安全）: %s", e)
+        return fallback
+
+
+app.config["SECRET_KEY"] = _resolve_secret_key()
 
 # 旧库迁移：数据位置被指定、且老库仍在程序目录时，自动搬迁（含 SQLite 附属文件）
 _old_db = _ROOT / "downloads.db"
@@ -248,6 +298,26 @@ def serve(app, gateway_socket, gateway_prefix, host, port) -> None:
     srv.serve_forever()
 
 
+def _start_api_bridges(bridges: list[tuple[str, Any]]) -> None:
+    """后台线程体：逐个拉起 auto_start 的 API 桥接。
+
+    - start() 幂等且锁内串行；失败只记 WARNING（与原 main() 行为一致），
+      不影响 Web 服务（已在 serve() 中就绪）
+    - 客户端 base_url 属性自带惰性 start()：本线程尚未拉起时，首个业务
+      请求会在锁上等待/自行拉起，语义与 auto_start=false 的"用到再拉"一致
+    """
+    for name, br in bridges:
+        if not br.auto_start:
+            continue
+        try:
+            br.start()
+            logger.info("%sAPI 服务就绪: %s", name, br.base_url)
+        except RuntimeError as e:
+            logger.warning("%sAPI 服务启动失败: %s", name, e)
+        except Exception as e:            # 后台线程兜底：任何异常不得带崩线程
+            logger.warning("%sAPI 服务启动异常: %s", name, e)
+
+
 def main() -> None:
     host, port = _read_web_bind()
     # Setting.get 需在 app context 内调用；读出后显式传入，
@@ -276,24 +346,24 @@ def main() -> None:
     atexit.register(qq_bridge_inst.stop)
     kugou_bridge_inst = kugou_bridge.get_bridge(auto_start=kugou_auto_start, port=kugou_api_port)
     atexit.register(kugou_bridge_inst.stop)
-    if ncm_bridge.auto_start:
-        try:
-            ncm_bridge.start()
-            logger.info("网易云API服务就绪: %s", ncm_bridge.base_url)
-        except RuntimeError as e:
-            logger.warning("网易云API服务启动失败: %s", e)
-    if qq_bridge_inst.auto_start:
-        try:
-            qq_bridge_inst.start()
-            logger.info("QQ音乐API服务就绪: %s", qq_bridge_inst.base_url)
-        except RuntimeError as e:
-            logger.warning("QQ音乐API服务启动失败: %s", e)
-    if kugou_bridge_inst.auto_start:
-        try:
-            kugou_bridge_inst.start()
-            logger.info("酷狗音乐API服务就绪: %s", kugou_bridge_inst.base_url)
-        except RuntimeError as e:
-            logger.warning("酷狗音乐API服务启动失败: %s", e)
+    # API 桥接后台异步启动：同步启动曾在 serve() 之前阻塞最长 6×60s，
+    # 撞上飞牛启动脚本 60s socket 等待窗口导致应用启动失败（见
+    # 《修复方案-API桥接后台异步启动-2026-09-27.md》§1）。
+    # daemon 线程 + 逐个串行，顺序与原逻辑一致（ncm → qq → kugou）
+    threading.Thread(
+        target=_start_api_bridges,
+        args=([
+            ("网易云", ncm_bridge),
+            ("QQ音乐", qq_bridge_inst),
+            ("酷狗音乐", kugou_bridge_inst),
+        ],),
+        name="api-bridge-starter",
+        # daemon=True 是方案成立的关键：主进程退出时该线程被强制带走，
+        # 避免 stop() 在 finally 处阻塞等待；在途子进程由 spawn_protected
+        # 的 PDEATHSIG / Win 作业对象兜底回收
+        daemon=True,
+    ).start()
+    logger.info("API 服务转后台启动，Web 服务先行就绪")
     task_manager.start()
     logger.info("=" * 50)
     logger.info("Deen音乐下载器 Web 服务启动 (v%s)", __version__)

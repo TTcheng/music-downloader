@@ -136,19 +136,19 @@ async function loadPlaylists() {
             const checked = p.enabled ? "checked" : "";
             const syncTime = p.last_synced_at || "从未同步";
             const platformBadge = p.platform_name
-                ? `<span class="badge-platform badge ${p.platform === 'qq' ? 'bg-info' : 'bg-primary'}">${p.platform_name}</span> `
+                ? `<span class="badge-platform badge ${p.platform === 'qq' ? 'bg-info' : 'bg-primary'}">${escapeHtml(p.platform_name)}</span> `
                 : "";
             return `
                 <tr>
                     <td>
                         <div class="form-check form-switch">
-                            <input class="form-check-input toggle-enabled" type="checkbox" ${checked} data-id="${p.id}" data-platform="${p.platform}">
+                            <input class="form-check-input toggle-enabled" type="checkbox" ${checked} data-id="${p.id}" data-platform="${escapeHtml(p.platform)}">
                         </div>
                     </td>
                     <td>${platformBadge}${escapeHtml(p.name)}</td>
                     <td><span class="badge ${p.type === 'official' ? 'bg-info' : 'bg-secondary'}">${typeText}</span></td>
                     <td>
-                        <input type="number" class="form-control form-control-sm limit-input" value="${p.limit_count}" data-id="${p.id}" data-platform="${p.platform}" min="1" max="9999" style="width:70px">
+                        <input type="number" class="form-control form-control-sm limit-input" value="${p.limit_count}" data-id="${p.id}" data-platform="${escapeHtml(p.platform)}" min="1" max="9999" style="width:70px">
                     </td>
                     <td>${p.track_count || 0}</td>
                     <td><small class="text-muted">${syncTime}</small></td>
@@ -156,7 +156,7 @@ async function loadPlaylists() {
                         <button class="btn btn-sm btn-outline-primary btn-sync" data-id="${p.id}">
                             <i class="bi bi-arrow-repeat"></i> 同步
                         </button>
-                        <button class="btn btn-sm btn-outline-danger btn-delete" data-id="${p.id}" data-name="${escapeHtml(p.name)}" data-platform="${p.platform}">
+                        <button class="btn btn-sm btn-outline-danger btn-delete" data-id="${p.id}" data-name="${escapeHtml(p.name)}" data-platform="${escapeHtml(p.platform)}">
                             <i class="bi bi-trash"></i>
                         </button>
                     </td>

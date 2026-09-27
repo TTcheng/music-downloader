@@ -28,9 +28,16 @@ async function api(url, options = {}) {
             window.location.href = base + "/login";
             return new Promise(() => {});  // 永不 resolve，避免后续逻辑报错
         }
-        // 403 无权限：抛错提示
+        // 403 无权限：先识别"首登强制改密"拦截（后端带 must_change_password
+        // 标记），跳改密页；其余按普通无权限抛错
         if (resp.status === 403) {
-            throw new Error("无权限执行此操作");
+            let body403 = {};
+            try { body403 = await resp.json(); } catch (_) {}
+            if (body403.must_change_password) {
+                window.location.href = base + "/change_password";
+                return new Promise(() => {});  // 跳转后不 resolve，避免后续逻辑报错
+            }
+            throw new Error(body403.msg || "无权限执行此操作");
         }
         // 非 2xx：后端异常页（如 HTML 500）在此拦截。
         // 否则 resp.json() 抛 SyntaxError 掩盖真实原因；且若 5xx 恰好返回
