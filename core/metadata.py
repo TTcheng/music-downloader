@@ -49,43 +49,73 @@ def write_mp3_tags(
     album: str,
     year: str = "",
     cover_url: str = "",
-    lyric: str = "",
-    tlyric: str = "",
+    lyric: str | None = "",
+    tlyric: str | None = "",
     track_no: int = 0,
     disc_no: int = 0,
     albumartist: str = "",
+    write_lyric: bool = True,
+    write_meta: bool = True,
 ) -> bool:
-    """写入 MP3 ID3 标签（ID3v2.4：年份用 TDRC，音轨/碟号用 TRCK/TPOS）"""
+    """写入 MP3 ID3 标签（ID3v2.4：年份用 TDRC，音轨/碟号用 TRCK/TPOS）
+
+    歌词按 write_lyric 开关处理：`False` ⇒ 完全不碰已有歌词；`True` ⇒ 仅在
+    本次确有歌词时重建 `USLT` 帧（原文仅非空写入，翻译传空则删除）。
+
+    `USLT` 不进无条件 delall 清单：否则「本次无词」会把已有歌词一起抹掉。
+
+    元数据按 write_meta 开关处理：`False` ⇒ 标题/歌手/专辑/年份/音轨/碟号/
+    专辑歌手/封面完全不碰（封面亦不下载）；`True` ⇒ 按既有语义覆盖。
+    """
     try:
         audio = MP3(file_path)
         if audio.tags is None:
             audio.add_tags()
         tags = audio.tags
-        for key in ("TIT2", "TPE1", "TALB", "TDRC", "TYER", "APIC", "USLT",
-                    "TRCK", "TPOS", "TPE2"):
-            tags.delall(key)
+        # write_meta=False ⇒ 非歌词字段完全不碰（含封面，不下载不覆盖）。
+        # delall 清帧与重建必须在同一门控内：只清不建会把已有元数据抹掉
+        # （与 D1「只删 USLT 不重建」同型坑）。
+        if write_meta:
+            for key in ("TIT2", "TPE1", "TALB", "TDRC", "TYER", "APIC",
+                        "TRCK", "TPOS", "TPE2"):
+                tags.delall(key)
 
-        tags.add(TIT2(encoding=3, text=title))
-        tags.add(TPE1(encoding=3, text=artist))
-        tags.add(TALB(encoding=3, text=album))
-        if year:
-            tags.add(TDRC(encoding=3, text=year))
-        if track_no > 0:
-            tags.add(TRCK(encoding=3, text=str(track_no)))
-        if disc_no > 0:
-            tags.add(TPOS(encoding=3, text=str(disc_no)))
-        if albumartist:
-            tags.add(TPE2(encoding=3, text=albumartist))
+            tags.add(TIT2(encoding=3, text=title))
+            tags.add(TPE1(encoding=3, text=artist))
+            tags.add(TALB(encoding=3, text=album))
+            if year:
+                tags.add(TDRC(encoding=3, text=year))
+            if track_no > 0:
+                tags.add(TRCK(encoding=3, text=str(track_no)))
+            if disc_no > 0:
+                tags.add(TPOS(encoding=3, text=str(disc_no)))
+            if albumartist:
+                tags.add(TPE2(encoding=3, text=albumartist))
 
-        cover = _download_cover(cover_url)
-        if cover:
-            mime = _guess_cover_mime(cover)
-            tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover))
+            cover = _download_cover(cover_url)
+            if cover:
+                mime = _guess_cover_mime(cover)
+                tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover",
+                              data=cover))
 
-        if lyric:
-            tags.add(USLT(encoding=3, lang="chi", desc="Lyrics", text=lyric))
-        if tlyric:
-            tags.add(USLT(encoding=3, lang="chi", desc="Lyrics-Translation", text=tlyric))
+        # 歌词：write_lyric=False ⇒ 整体跳过，已有歌词原样保留。
+        # 其余情况与 write_flac_tags / write_ogg_tags 逐行对齐（这是修复点：
+        # 原先无条件 delall("USLT")，本次无词时会把已有歌词一起抹掉）：
+        #   原文：仅非空时写入；空值不动旧值
+        #   翻译：写入覆盖；传空则摘掉翻译帧（原文帧不受影响）
+        if write_lyric:
+            if lyric:
+                tags.delall("USLT")
+                tags.add(USLT(encoding=3, lang="chi", desc="Lyrics", text=lyric))
+            if tlyric:
+                tags.add(USLT(encoding=3, lang="chi",
+                              desc="Lyrics-Translation", text=tlyric))
+            elif any(f.desc == "Lyrics-Translation" for f in tags.getall("USLT")):
+                kept = [f for f in tags.getall("USLT")
+                        if f.desc != "Lyrics-Translation"]
+                tags.delall("USLT")
+                for f in kept:
+                    tags.add(f)
 
         audio.save()
         return True
@@ -101,50 +131,66 @@ def write_flac_tags(
     album: str,
     year: str = "",
     cover_url: str = "",
-    lyric: str = "",
-    tlyric: str = "",
+    lyric: str | None = "",
+    tlyric: str | None = "",
     track_no: int = 0,
     disc_no: int = 0,
     albumartist: str = "",
+    write_lyric: bool = True,
+    write_meta: bool = True,
 ) -> bool:
-    """写入 FLAC Vorbis Comment 标签"""
+    """写入 FLAC Vorbis Comment 标签
+
+    歌词语义与 write_mp3_tags / write_ogg_tags 逐行对齐：write_lyric=False 时
+    完全不碰已有歌词（含 translation）；为 True 时 lyrics 仅非空写入，
+    translation 传空则删除。
+
+    元数据按 write_meta 开关处理：False 时非歌词字段完全不碰（含封面，
+    不覆盖、不 pop 清理）；True 时按既有语义覆盖。
+    """
     try:
         audio = FLAC(file_path)
-        audio["title"] = title
-        audio["artist"] = artist
-        audio["album"] = album
-        if year:
-            audio["date"] = year
-        else:
-            audio.pop("date", None)
-        if track_no > 0:
-            audio["tracknumber"] = str(track_no)
-        else:
-            audio.pop("tracknumber", None)
-        if disc_no > 0:
-            audio["discnumber"] = str(disc_no)
-        else:
-            audio.pop("discnumber", None)
-        if albumartist:
-            audio["albumartist"] = albumartist
-        else:
-            audio.pop("albumartist", None)
-        if lyric:
-            audio["lyrics"] = lyric
-        if tlyric:
-            audio["translation"] = tlyric
-        elif "translation" in audio:
-            audio.pop("translation", None)
+        # write_meta=False ⇒ 非歌词字段完全不碰（不覆盖、不 pop 清理）
+        if write_meta:
+            audio["title"] = title
+            audio["artist"] = artist
+            audio["album"] = album
+            if year:
+                audio["date"] = year
+            else:
+                audio.pop("date", None)
+            if track_no > 0:
+                audio["tracknumber"] = str(track_no)
+            else:
+                audio.pop("tracknumber", None)
+            if disc_no > 0:
+                audio["discnumber"] = str(disc_no)
+            else:
+                audio.pop("discnumber", None)
+            if albumartist:
+                audio["albumartist"] = albumartist
+            else:
+                audio.pop("albumartist", None)
+        if write_lyric:
+            if lyric:
+                audio["lyrics"] = lyric
+            if tlyric:
+                audio["translation"] = tlyric
+            elif "translation" in audio:
+                audio.pop("translation", None)
+        # write_lyric=False：歌词字段完全不碰（保留文件里已有的）
 
-        audio.clear_pictures()
-        cover = _download_cover(cover_url)
-        if cover:
-            pic = Picture()
-            pic.type = 3
-            pic.mime = _guess_cover_mime(cover)
-            pic.desc = "Cover"
-            pic.data = cover
-            audio.add_picture(pic)
+        # write_meta=False ⇒ 封面完全不碰（不下载、不清旧、不覆盖）
+        if write_meta:
+            audio.clear_pictures()
+            cover = _download_cover(cover_url)
+            if cover:
+                pic = Picture()
+                pic.type = 3
+                pic.mime = _guess_cover_mime(cover)
+                pic.desc = "Cover"
+                pic.data = cover
+                audio.add_picture(pic)
 
         audio.save()
         return True
@@ -160,11 +206,13 @@ def write_ogg_tags(
     album: str,
     year: str = "",
     cover_url: str = "",
-    lyric: str = "",
-    tlyric: str = "",
+    lyric: str | None = "",
+    tlyric: str | None = "",
     track_no: int = 0,
     disc_no: int = 0,
     albumartist: str = "",
+    write_lyric: bool = True,
+    write_meta: bool = True,
 ) -> bool:
     """写入 OGG（Vorbis / Opus）Vorbis Comment 标签
 
@@ -174,6 +222,9 @@ def write_ogg_tags(
     封面：mutagen 的 OggVorbis/OggOpus 均无 FLAC 那套 add_picture/
     clear_pictures，按 Vorbis Comment 规范写 METADATA_BLOCK_PICTURE =
     base64(FLAC Picture 块)——与 foobar2000 / 各播放器读法一致。
+
+    元数据按 write_meta 开关处理：`False` ⇒ 非歌词字段完全不碰——
+    `pop("metadata_block_picture")` 的清封面必须与重建同门，否则清了不建。
     """
     try:
         audio = MutagenFile(str(file_path))
@@ -181,44 +232,50 @@ def write_ogg_tags(
             logger.error("写入 OGG 标签失败 %s: 不支持的容器类型 %s",
                          file_path.name, type(audio).__name__)
             return False
-        audio["title"] = title
-        audio["artist"] = artist
-        audio["album"] = album
-        if year:
-            audio["date"] = year
-        else:
-            audio.pop("date", None)
-        if track_no > 0:
-            audio["tracknumber"] = str(track_no)
-        else:
-            audio.pop("tracknumber", None)
-        if disc_no > 0:
-            audio["discnumber"] = str(disc_no)
-        else:
-            audio.pop("discnumber", None)
-        if albumartist:
-            audio["albumartist"] = albumartist
-        else:
-            audio.pop("albumartist", None)
-        if lyric:
-            audio["lyrics"] = lyric
-        if tlyric:
-            audio["translation"] = tlyric
-        elif "translation" in audio:
-            audio.pop("translation", None)
+        # write_meta=False ⇒ 非歌词字段完全不碰（不覆盖、不 pop 清理）
+        if write_meta:
+            audio["title"] = title
+            audio["artist"] = artist
+            audio["album"] = album
+            if year:
+                audio["date"] = year
+            else:
+                audio.pop("date", None)
+            if track_no > 0:
+                audio["tracknumber"] = str(track_no)
+            else:
+                audio.pop("tracknumber", None)
+            if disc_no > 0:
+                audio["discnumber"] = str(disc_no)
+            else:
+                audio.pop("discnumber", None)
+            if albumartist:
+                audio["albumartist"] = albumartist
+            else:
+                audio.pop("albumartist", None)
+        if write_lyric:
+            if lyric:
+                audio["lyrics"] = lyric
+            if tlyric:
+                audio["translation"] = tlyric
+            elif "translation" in audio:
+                audio.pop("translation", None)
+        # write_lyric=False：歌词字段完全不碰（保留文件里已有的）
 
-        # 清封面（等价于 FLAC 的 clear_pictures）
-        audio.pop("metadata_block_picture", None)
-        cover = _download_cover(cover_url)
-        if cover:
-            pic = Picture()
-            pic.type = 3
-            pic.mime = _guess_cover_mime(cover)
-            pic.desc = "Cover"
-            pic.data = cover
-            audio["metadata_block_picture"] = [
-                base64.b64encode(pic.write()).decode("ascii")
-            ]
+        # 清封面（等价于 FLAC 的 clear_pictures）。
+        # write_meta=False ⇒ 封面完全不碰：pop 必须与重建同门，否则清了不建
+        if write_meta:
+            audio.pop("metadata_block_picture", None)
+            cover = _download_cover(cover_url)
+            if cover:
+                pic = Picture()
+                pic.type = 3
+                pic.mime = _guess_cover_mime(cover)
+                pic.desc = "Cover"
+                pic.data = cover
+                audio["metadata_block_picture"] = [
+                    base64.b64encode(pic.write()).decode("ascii")
+                ]
 
         audio.save()
         return True
@@ -227,12 +284,17 @@ def write_ogg_tags(
         return False
 
 
-def write_tags(file_path: Path, meta: dict) -> bool:
+def write_tags(file_path: Path, meta: dict,
+               write_lyric: bool = True, write_meta: bool = True) -> bool:
     """根据扩展名自动选择写入器
 
     入口归一：meta 字段可能为 None（上游「键存在值为 null」，dict.get 默认值
     兜不住），而 mutagen 的 `audio["title"] = None` / `TIT2(text=None)` 会直接
     抛异常导致整首歌标签写不进去。此处单点收敛为 ""，各写入器无需再防御。
+
+    `write_lyric` 与 `write_meta` 各管各的字段块：歌词（含翻译）只受
+    write_lyric 约束，其余字段（标题/歌手/专辑/年份/音轨/碟号/专辑歌手/
+    封面）只受 write_meta 约束。两开关默认 True，既有调用方零影响。
     """
     ext = file_path.suffix.lower()
     common = dict(
@@ -247,6 +309,9 @@ def write_tags(file_path: Path, meta: dict) -> bool:
         disc_no=_as_int(meta.get("disc_no")),
         albumartist=str(meta.get("albumartist") or ""),
     )
+    common["write_lyric"] = write_lyric
+    common["write_meta"] = write_meta
+
     if ext == ".mp3":
         return write_mp3_tags(file_path, **common)
     if ext == ".flac":

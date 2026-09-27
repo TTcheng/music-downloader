@@ -1523,7 +1523,13 @@ class TaskManager:
             return
 
         # 写入元数据
-        if write_meta:
+        # write_meta 与 write_lyric 是两个独立开关，各自透传给 write_tags、
+        # 在写入器内部各管各的字段块：元数据（标题/封面/音轨…）只受
+        # write_meta 约束，歌词只受 write_lyric 约束。此前整个 write_tags 被
+        # write_meta 单点门控，导致只勾「嵌入歌词」不勾「写入元数据」时歌词
+        # 永远进不了文件；且 write_lyric 在落盘阶段从未被引用（它只作用于
+        # _fetch_meta_with_retry 的取词门控）。
+        if write_meta or write_lyric:
             write_tags(
                 path,
                 {
@@ -1538,6 +1544,8 @@ class TaskManager:
                     "disc_no": meta.get("disc_no", 0),
                     "albumartist": meta.get("albumartist", ""),
                 },
+                write_lyric=write_lyric,
+                write_meta=write_meta,
             )
 
         # 标记成功（记录 account_id 用于额度统计）

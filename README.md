@@ -93,7 +93,7 @@ python -m venv .venv
 | `level_qq` | （空） | QQ 音乐音质（高→低）：jymaster / hires / lossless / ogg640 / exhigh / standard（空=未单独设置，回退旧全局 `level`，其缺省为 exhigh） |
 | `level_kugou` | （空） | 酷狗音乐音质（高→低）：hires / lossless / exhigh / standard（空=未单独设置，回退旧全局 `level`，其缺省为 exhigh） |
 | `enable_quality_fallback` | `true` | 目标音质取不到流时是否自动向低音质档回退 |
-| `write_metadata` | `true` | 是否写入元数据（标题/艺术家/专辑/封面/歌词） |
+| `write_metadata` | `true` | 是否写入元数据（标题/艺术家/专辑/封面） |
 | `write_lyric` | `true` | 是否下载并写入歌词 |
 | `auto_sync_enabled` | `true` | 是否启用定时同步 |
 | `sync_times` | `03:00,09:00,21:00` | 定时同步时间点（HH:MM 逗号分隔） |
@@ -203,4 +203,4 @@ chmod +x build_linux.sh && ./build_linux.sh
 
 ## 版本
 
-当前版本：**0.7.0**（见 [version.txt](version.txt)，更新日志见 [docs/CHANGELOG.md](docs/CHANGELOG.md)）
+当前版本：**0.7.1**（见 [version.txt](version.txt)，更新日志见 [docs/CHANGELOG.md](docs/CHANGELOG.md)）
