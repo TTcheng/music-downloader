@@ -111,11 +111,11 @@ RUN set -eux; \
 # Workdir and persistent data layout.
 WORKDIR /app
 # /data   — persistent app state (SQLite DB, logs, ncm tmp)
-# /downloads — large media files (kept on a separate mount by convention)
+# /app/downloads — large media files (kept on a separate mount by convention)
 ENV APP_DATA_DIR=/data \
     DATA_DIR=/data \
-    DOWNLOADS_DIR=/downloads
-RUN mkdir -p /data /downloads && chown -R deen:deen /data /downloads
+    DOWNLOADS_DIR=/app/downloads
+RUN mkdir -p /data /app/downloads && chown -R deen:deen /data /app/downloads
 
 # Copy API binaries + app source last (changes most often → top of layer cache).
 COPY --chown=deen:deen api/ /app/api/

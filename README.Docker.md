@@ -43,14 +43,15 @@ docker compose logs -f
 | 挂载点 | 用途 |
 |--------|------|
 | `/data` | SQLite（账号/歌单/任务/设置）+ 日志 + ncm-api 临时缓存 |
-| `/downloads` | 下载的音乐文件 |
+| `/app/downloads` | 下载的音乐文件 |
+| `/app/logs` | 日志webapp.log |
 
 如需把下载目录落到宿主机可见位置，编辑 `docker-compose.yml`：
 
 ```yaml
 volumes:
   - /mnt/nas/deen-data:/data
-  - /mnt/nas/music:/downloads   # 改成宿主机绝对路径
+  - /mnt/nas/music:/app/downloads   # 改成宿主机绝对路径
 ```
 
 ## 常用命令
@@ -81,7 +82,7 @@ docker build -t chongya369/deen-music-downloader:latest .
 docker run -d --name deen \
   -p 45600:45600 \
   -v ./deen-data:/data \
-  -v ./deen-downloads:/downloads \
+  -v ./deen-downloads:/app/downloads \
   -e TZ=Asia/Shanghai \
   --restart unless-stopped \
   chongya369/deen-music-downloader:latest

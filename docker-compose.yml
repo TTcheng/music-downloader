@@ -8,7 +8,8 @@
 #
 # 数据持久化：
 #   - /data：SQLite（账号/歌单/任务/设置） + 日志 + ncm-api 临时缓存
-#   - /downloads（或挂载到任意宿主机路径）：下载的音乐文件
+#   - /app/downloads（或挂载到任意宿主机路径）：下载的音乐文件
+#   - /app/logs 日志文件（webapp.log）其他日志在/data目录
 #
 # 高级用法：
 #   - 改端口：编辑下方 ports 映射，或通过环境变量 WEB_PORT=*:45601 改监听地址
@@ -48,9 +49,9 @@ services:
       - ./deen-data:/data
       # 下载文件 → 命名卷，便于备份/迁移。
       # 若希望直接在宿主机浏览音乐，可改为：
-      #   - /path/on/host:/downloads
-      - ./deen-downloads:/downloads
-
+      #   - /path/on/host:/app/downloads
+      - ./deen-downloads:/app/downloads
+      - ./deen-logs:/app/logs
     # 环境变量（全部可选）
     environment:
       # 应用数据目录（与 Dockerfile 中 ENV APP_DATA_DIR=/data 保持一致，
