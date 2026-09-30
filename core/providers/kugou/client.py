@@ -236,11 +236,115 @@ def _cache_gcid_mappings(items: list[dict]) -> None:
             _save_gcid_cache()
 
 
-def _resolve_gcid(special_id: int) -> str:
-    """specialid → global_collection_id（miss 返回空串）"""
+# gcid 页面抓取失败记忆：{special_id: {"count": int, "ts": float}}
+# 连续 2 次失败才记忆，TTL 10 分钟后自动过期可重试（避免一次瞬时失败把
+# 「添加失败→手动重试」短路到进程重启）；专用锁保护，锁内不做网络 IO。
+_scrape_failures: dict[int, dict] = {}
+_scrape_lock = threading.Lock()
+_SCRAPE_FAIL_TTL = 600          # 秒
+_SCRAPE_FAIL_THRESHOLD = 2      # 连续失败次数阈值
+_SCRAPE_FAIL_MAX = 1000         # 容量上限（FIFO 淘汰）
+_SCRAPE_GCID_RE = re.compile(r"collection_\d+_\d+_\d+_\d+")
+_SPECIAL_PAGE_URL = "https://www.kugou.com/yy/special/single/{}.html"
+
+
+def register_gcid(pid: int, gcid: str) -> None:
+    """外部写入口（api.py 分享链接路径预写缓存）：specialid/合成 id → gcid
+
+    与 _cache_gcid_mappings 同款写入口约定（持锁、落盘、FIFO 容量控制）。
+    """
+    gcid = str(gcid or "").strip()
+    if not gcid:
+        return
     with _gcid_lock:
         _load_gcid_cache()
-        return _gcid_cache.get(special_id, "")
+        if _gcid_cache.get(pid) != gcid:
+            _gcid_cache[pid] = gcid
+            overflow = len(_gcid_cache) - _GCID_CACHE_MAX
+            for k in list(_gcid_cache)[:max(0, overflow)]:
+                _gcid_cache.pop(k, None)
+            _save_gcid_cache()
+
+
+def _scrape_recently_failed(special_id: int) -> bool:
+    """失败记忆是否生效（连续失败达阈值且 TTL 未过期；过期即清除并恢复重试）"""
+    with _scrape_lock:
+        rec = _scrape_failures.get(special_id)
+        if not rec:
+            return False
+        if time.time() - rec["ts"] > _SCRAPE_FAIL_TTL:
+            _scrape_failures.pop(special_id, None)
+            return False
+        return rec["count"] >= _SCRAPE_FAIL_THRESHOLD
+
+
+def _record_scrape_failure(special_id: int) -> None:
+    with _scrape_lock:
+        rec = _scrape_failures.get(special_id) or {"count": 0, "ts": 0.0}
+        rec["count"] += 1
+        rec["ts"] = time.time()
+        _scrape_failures[special_id] = rec
+        overflow = len(_scrape_failures) - _SCRAPE_FAIL_MAX
+        for k in list(_scrape_failures)[:max(0, overflow)]:
+            _scrape_failures.pop(k, None)
+
+
+def _clear_scrape_failure(special_id: int) -> None:
+    with _scrape_lock:
+        _scrape_failures.pop(special_id, None)
+
+
+def _scrape_gcid_from_page(special_id: int) -> str:
+    """PC 网页版 special/single 页抓 gcid 兜底（缓存 miss 时解除
+    「必须先浏览热门歌单才有缓存」的限制）
+
+    2026-09-30 实测：页面为服务端渲染，内嵌唯一 gcid（29/30 次复核同一值），
+    与上游基准逐一一致；匿名直连可达。任何失败返回 ""（与缓存 miss 同语义，
+    不影响 rank 路径）。
+    """
+    try:
+        s = requests.Session()
+        s.trust_env = False
+        r = s.get(_SPECIAL_PAGE_URL.format(special_id),
+                  headers={"User-Agent": _UA}, timeout=15)
+        if r.status_code != 200:
+            logger.info("酷狗 specialid %s 页面抓取 gcid 失败: HTTP %s",
+                        special_id, r.status_code)
+            return ""
+        m = _SCRAPE_GCID_RE.search(r.text or "")
+        if not m:
+            logger.info("酷狗 specialid %s 页面未内嵌 gcid", special_id)
+            return ""
+        gcid = m.group(0)
+        logger.info("酷狗 specialid %s 经 PC 页面兜底获取 gcid=%s",
+                    special_id, gcid)
+        return gcid
+    except Exception as e:
+        logger.info("酷狗 specialid %s 页面抓取 gcid 异常: %s", special_id, e)
+        return ""
+
+
+def _resolve_gcid(special_id: int) -> str:
+    """specialid/合成 id → global_collection_id
+
+    缓存命中直接返回；miss 时抓 PC 网页版页面兜底并回写缓存（添加与同步
+    共用本函数）。连续 2 次抓取失败且 TTL 10 分钟内直接短路，防止同步任务
+    反复打页面；TTL 过期自动恢复重试。
+    """
+    with _gcid_lock:
+        _load_gcid_cache()
+        gcid = _gcid_cache.get(special_id, "")
+    if gcid:
+        return gcid
+    if _scrape_recently_failed(special_id):
+        return ""
+    gcid = _scrape_gcid_from_page(special_id)
+    if gcid:
+        register_gcid(special_id, gcid)
+        _clear_scrape_failure(special_id)
+    else:
+        _record_scrape_failure(special_id)
+    return gcid
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

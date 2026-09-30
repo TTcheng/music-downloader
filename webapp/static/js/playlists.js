@@ -372,12 +372,15 @@ function updatePagination(curPage, totalPages, total) {
 
 function renderCard(item, type, source) {
     const added = myPlaylistIds.has(item.id);
+    // 非歌曲类榜单（专辑/有声/MV 销量榜，后端 get_toplists 返回 addable=false）
+    // 置灰添加按钮；严格等判定保证无该字段的平台（网易云/酷狗）不受影响
+    const notAddable = source === "toplist" && item.addable === false;
     const playCount = item.play_count ? formatPlayCount(item.play_count) : "";
     const cover = item.cover_img_url
         ? `<img src="${escapeHtml(item.cover_img_url)}" class="card-img-top discover-cover" alt="${escapeHtml(item.name)}">`
         : `<div class="discover-cover-placeholder"><i class="bi bi-music-note-beamed"></i></div>`;
     const meta = source === "toplist"
-        ? (item.update_frequency || "排行榜")
+        ? (notAddable ? "非歌曲榜" : (item.update_frequency || "排行榜"))
         : (playCount ? "播放 " + playCount : "歌单");
     return `
         <div class="col-lg-2 col-md-3 col-sm-4 col-6">
@@ -388,9 +391,13 @@ function renderCard(item, type, source) {
                     <small class="text-muted d-block text-truncate">${meta}</small>
                 </div>
                 <div class="card-footer p-2 text-center">
-                    <button class="btn btn-sm ${added ? 'btn-secondary' : 'btn-outline-primary'} w-100 btn-add-discover"
-                        data-id="${item.id}" data-name="${escapeHtml(item.name)}" data-type="${type}" ${added ? 'disabled' : ''}>
-                        ${added ? '<i class="bi bi-check2"></i> 已添加' : '<i class="bi bi-plus"></i> 添加'}
+                    <button class="btn btn-sm ${added || notAddable ? 'btn-secondary' : 'btn-outline-primary'} w-100 btn-add-discover"
+                        data-id="${item.id}" data-name="${escapeHtml(item.name)}" data-type="${type}"
+                        ${added || notAddable ? 'disabled' : ''}
+                        ${notAddable ? 'title="该榜单为专辑/非歌曲类榜单，无歌曲列表"' : ''}>
+                        ${added ? '<i class="bi bi-check2"></i> 已添加'
+                            : (notAddable ? '<i class="bi bi-slash-circle"></i> 非歌曲榜'
+                                : '<i class="bi bi-plus"></i> 添加')}
                     </button>
                 </div>
             </div>
