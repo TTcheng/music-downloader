@@ -48,7 +48,8 @@ from core.providers.base import MusicProvider
 from core.providers.netease.client import OFFICIAL_TOPLISTS
 from core.providers.netease.parse_links import parse_playlist_id
 from core.providers.kugou import bridge as kugou_bridge
-from core.providers.kugou.parse_links import parse_kugou_playlist_id
+from core.providers.kugou.client import register_gcid
+from core.providers.kugou.parse_links import parse_kugou_playlist_id, parse_kugou_share
 from core.providers.qq.parse_links import parse_qq_playlist_id
 from core.providers import get_provider
 from core.providers.netease import bridge
@@ -335,7 +336,15 @@ def add_playlist():
     if platform == "qq":
         pid = parse_qq_playlist_id(source)
     elif platform == "kugou":
-        pid = parse_kugou_playlist_id(source)
+        # 分享短链 / zlist 长链优先（含 gcid 参数或可展开），
+        # 未命中回退 rankid / PC 歌单链接 / 纯数字解析
+        parsed = parse_kugou_share(source)
+        if parsed:
+            pid = parsed["id"]
+            # 预写 specialid/合成 id → gcid 缓存：详情拉取与每日同步直接命中
+            register_gcid(pid, parsed["gcid"])
+        else:
+            pid = parse_kugou_playlist_id(source)
     else:
         pid = parse_playlist_id(source)
     if pid is None:
@@ -365,6 +374,11 @@ def add_playlist():
                     return jsonify({"code": 1, "msg":
                         f"「{meta.get('name') or pid}」为专辑/非歌曲类榜单，"
                         "无歌曲列表，无法添加"})
+            if platform == "kugou":
+                # 中性文案：不暴露 gcid 内部术语，兼容「歌单失效/空歌单/私密」
+                return jsonify({"code": 1, "msg":
+                    f"酷狗歌单 {pid} 暂无法获取内容（歌单可能已失效或为空），"
+                    "可在酷狗网页版打开确认后重试"})
             return jsonify({"code": 1, "msg": "无法获取歌单信息，请检查 ID 或 Cookie"})
         # 上游歌单名为空（键存在值为 null）时不再回落 str(pid)：Playlist.name 是
         # nullable=False，"18398083374" 这种无名记录同样是脏数据，明确拒绝更一致
